@@ -21,6 +21,7 @@ if "--save" in sys.argv:
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
+from matplotlib.text import Text
 from matplotlib.widgets import AxesWidget, Button, Slider
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
@@ -53,7 +54,35 @@ C_TRAIN, C_TEST = "#2f6db3", "#ef8a17"
 C_FIT, C_GUESS, C_MEAN = "#c62828", "#7b3fa0", "#444444"
 C_POS, C_NEG = "#2e9e5b", "#d64545"
 XLIM, YLIM = (15, 110), (0, 2800)
-FS_TEXT = 11.5
+FS_TEXT, FS_NOTE = 11.5, 9.5
+
+# --- Abbreviations: listed under the text of every page that uses them, details in a popup on hover ---
+GLOSSARY = [    # (pattern, symbol, meaning, formula, details)
+    ("SSE", "SSE", "sum of squared errors, how wrong a line is",
+     r"$SSE = \sum (y_i - \hat{y}_i)^2$",
+     "Square the miss of every training apartment and add them up. Least squares picks the line "
+     "with the smallest SSE. Its unit is CHF², hence the big numbers."),
+    ("SST", "SST", r"total sum of squares, the error of always guessing $\bar{y}$",
+     r"$SST = \sum (y_i - \bar{y})^2$",
+     "The SSE of the laziest prediction: a flat line at the average rent. It measures how much the "
+     "rents vary before the size is used at all."),
+    (r"R\^2|R²", "R^2", "coefficient of determination, the share of the variation explained",
+     r"$R^2 = 1 - SSE\,/\,SST$",
+     "1 means every dot lies exactly on the line, 0 means no better than always guessing the "
+     "average. On test data it can even drop below 0."),
+    ("RMSE", "RMSE", "root mean squared error, the typical miss in CHF",
+     r"$RMSE = \sqrt{SSE\,/\,n}$",
+     "Average the squared errors, then take the square root to get from CHF² back to CHF. "
+     "Big misses weigh more than in a plain average of the misses."),
+    (r"S_\{xy\}", "S_{xy}", "sum of cross products, do size and rent rise together?",
+     r"$S_{xy} = \sum (x_i - \bar{x})(y_i - \bar{y})$",
+     "The total signed area of the rectangles from the centre to every point. Positive if bigger "
+     "apartments tend to cost more, negative if they tend to cost less."),
+    (r"S_\{xx\}", "S_{xx}", "sum of squares of $x$, how spread out the sizes are",
+     r"$S_{xx} = \sum (x_i - \bar{x})^2$",
+     r"The total area of the squares with side $x_i - \bar{x}$. Dividing $S_{xy}$ by it turns an "
+     "area into a slope: CHF per m²."),
+]
 
 
 def sse(b, a):
@@ -138,6 +167,19 @@ def wrap(text, width):
     return "\n".join(lines)
 
 
+def glossary_in(text):
+    """The GLOSSARY entries a text mentions, in order of first appearance."""
+    found = [(match.start(), entry) for entry in GLOSSARY
+             if (match := re.search(rf"(?<![A-Za-z])(?:{entry[0]})(?![A-Za-z])", text))]
+    return [entry for _, entry in sorted(found, key=lambda f: f[0])]
+
+
+def explain(entries):
+    """Popup text for some GLOSSARY entries."""
+    return "\n\n".join(wrap(rf"$\mathbf{{{symbol}}}$ {meaning}" f"\n{formula}\n{details}", 56)
+                       for _, symbol, meaning, formula, details in entries)
+
+
 # --- The app ---
 STEPS = []
 
@@ -169,12 +211,17 @@ class Tutor:
         self.dots_ax.set(xlim=(-0.6, len(STEPS) - 0.4), ylim=(-1, 1))
         self.dots = self.dots_ax.scatter(range(len(STEPS)), np.zeros(len(STEPS)), s=70)
 
-        self.guess = {"b": 8.0, "a": 900.0}      # the reader's own line, shared by all pages
+        self.popup = self.fig.text(0, 0, "", fontsize=10.5, linespacing=1.4, multialignment="left", zorder=100, visible=False,
+                                   bbox=dict(boxstyle="round,pad=0.7", fc="#fffdf5", ec="#d9a400"))
+        self.hoverable, self.hovered = None, None
+
+        self.guess = {"b": 8.0, "a": 900.0, "h": 400.0}   # the reader's own line, shared by all pages
         self.owned, self.slider_for = [], {}
         self.index = 0
 
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
+        self.fig.canvas.mpl_connect("motion_notify_event", self.on_move)
         self.fig.canvas.mpl_connect("resize_event", lambda _: self.show(self.index))  # re-flow text
 
     # navigation
@@ -185,8 +232,11 @@ class Tutor:
                 item.disconnect_events()
                 item.ax.remove()
             else:
+                self.disconnect_handlers(item)
                 item.remove()
         self.owned, self.slider_for = [], {}
+        self.hoverable, self.hovered = None, None    # collected again on the next mouse move
+        self.popup.set_visible(False)
         self.panel.clear()
         self.panel.axis("off")
 
@@ -206,6 +256,33 @@ class Tutor:
     def on_click(self, event):
         if event.inaxes is self.dots_ax and event.xdata is not None:
             self.show(round(event.xdata))
+
+    def on_move(self, event):
+        """Explain the abbreviations in the text under the mouse in a popup."""
+        if self.hoverable is None:               # after drawing, so tick labels exist too
+            self.hoverable = [(text, entries) for text in self.fig.findobj(Text)
+                              if text is not self.popup and (entries := glossary_in(text.get_text()))]
+        text, entries = next(((text, entries) for text, entries in self.hoverable if text.contains(event)[0]),
+                             (None, None))
+        if text is self.hovered:
+            return
+        self.hovered = text
+        if text is not None:
+            x, y = self.fig.transFigure.inverted().transform((event.x, event.y))
+            right, top = x > 0.5, y > 0.5        # open towards the middle of the window
+            self.popup.set(text=explain(entries), x=x - 0.01 if right else x + 0.01,
+                           y=y - 0.02 if top else y + 0.02, ha="right" if right else "left",
+                           va="top" if top else "bottom")
+        self.popup.set_visible(text is not None)
+        self.fig.canvas.draw_idle()
+
+    def disconnect_handlers(self, artist):
+        """3D axes connect mouse handlers to the canvas that would outlive artist.remove() and then crash."""
+        callbacks = self.fig.canvas.callbacks
+        for handlers in list(callbacks.callbacks.values()):
+            for cid, ref in list(handlers.items()):
+                if getattr(ref(), "__self__", None) is artist:
+                    callbacks.disconnect(cid)
 
     # page building blocks
     def content(self, slider_rows=0):
@@ -231,7 +308,7 @@ class Tutor:
 
     def sliders(self, keys, on_change):
         """Sliders for the shared guess ('b' slope, 'a' intercept) below the plot."""
-        spec = {"b": (0, 40, "slope b", "%.2f"), "a": (-800, 1800, "intercept a", "%.0f")}
+        spec = {"b": (0, 40, "slope b", "%.2f"), "a": (-800, 1800, "intercept a", "%.0f"), "h": (1, 600, "step h", "%.0f")}
         for row, key in enumerate(keys):
             lo, hi, label, fmt = spec[key]
             self.guess[key] = float(np.clip(self.guess[key], lo, hi))
@@ -253,11 +330,22 @@ class Tutor:
             self.slider_for[key].set_val(value)
 
     def write(self, *blocks):
-        """Lay out headings, paragraphs, formulas and boxes top to bottom in the right panel."""
+        """Lay out headings, paragraphs, formulas and boxes top to bottom in the right panel,
+        with the abbreviations they use explained at the bottom."""
         renderer = self.fig.canvas.get_renderer()
         frame = self.panel.get_window_extent(renderer)
         px_per_pt = self.fig.dpi / 72
         width = max(30, int(frame.width / px_per_pt / (FS_TEXT * 0.5)))
+
+        floor = 0.0                              # one line per abbreviation, stacked bottom up
+        for _, symbol, meaning, *_ in reversed(glossary_in("\n".join(blocks))):
+            note = self.panel.text(0, floor, wrap(rf"$\mathbf{{{symbol}}}$ {meaning}", int(width * FS_TEXT / FS_NOTE)),
+                                   fontsize=FS_NOTE, color="#555", va="bottom", transform=self.panel.transAxes)
+            floor += note.get_window_extent(renderer).height / frame.height + 0.006
+        if floor:
+            self.panel.plot([0, 1], [floor + 0.008] * 2, color="#ddd", linewidth=0.8, transform=self.panel.transAxes)
+            floor += 0.016
+
         y = 1.0
         for block in blocks:
             pad = 0
@@ -274,7 +362,7 @@ class Tutor:
                 kw = dict(x=0, s=wrap(block, width), fontsize=FS_TEXT, linespacing=1.4, color="#222")
             text = self.panel.text(y=y - pad, va="top", transform=self.panel.transAxes, **kw)
             y -= text.get_window_extent(renderer).height / frame.height + 2 * pad + 0.022
-        if y < -0.02:
+        if y < floor - 0.02:
             print(f"note: text panel of step {self.index + 1} overflows", file=sys.stderr)
 
 
@@ -294,10 +382,12 @@ def page_question(t):
         "predict the rent of an apartment we have never seen.",
         H("Training and test data"),
         "Exactly like linreg.py, 30% of the apartments are put aside first (orange squares). "
-        "Until step 13 we only use the 12 blue training dots. The test dots come back at the "
+        "Until step 14 we only use the 12 blue training dots. The test dots come back at the "
         "end to check the line honestly.",
         Box(r"$n = 12$ training pairs $(x_i,\ y_i)$"),
         "Use Next / Back or the arrow keys. Some steps have sliders: play with them!",
+        "Abbreviations are explained at the bottom of the page. Hover over them, or over any text "
+        "that uses them, for more details.",
     )
 
 
@@ -464,7 +554,75 @@ def page_landscape(t):
         "descent, and it is how neural networks learn.",
         "For a straight line there is a shortcut. At the very bottom the ground is flat in every "
         "direction. Flat means the derivative (the steepness of the ground) is zero, and that "
-        "equation we can solve exactly. First for $a$, then for $b$.",
+        "equation we can solve exactly. Next step: how a derivative is calculated.",
+    )
+
+
+@step("Derivatives: how steep is a curve?")
+def page_derivative(t):
+    xk, yk, b = xs[-1], ys[-1], 20                 # the largest apartment, slope frozen at a round number
+
+    def f(a):
+        return (yk - b * xk - a) ** 2
+
+    left, right = t.split(slider_rows=2)
+    ax = rent_axes(t, left, ylim=(0, 4000), title=f"One apartment and a line with slope {b}")
+    plot_train(ax, alpha=0.25, label=None)
+    ax.scatter([xk], [yk], s=80, color=C_TRAIN, edgecolor="black", zorder=5)
+    grid = np.array(XLIM)
+    line, = ax.plot(grid, grid * 0, color=C_GUESS, linewidth=2.5)
+    gap, = ax.plot([xk, xk], [yk, yk], color=C_NEG, linewidth=2.5)
+    gap_label = ax.text(xk - 2, yk, "", ha="right", va="center", fontsize=12, color=C_NEG, zorder=6,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.9))
+
+    ax2 = t.axes(right)
+    ax2.set(xlabel="intercept a", ylabel="f(a) (million CHF²)", xlim=(A_LINE[0], A_LINE[-1]),
+            ylim=(0, f(A_LINE).max() / 1e6 * 1.05))
+    ax2.set_title(r"Its squared error $f(a) = u^2$", loc="left", fontsize=11.5, color="#333")
+    ax2.grid(alpha=0.25)
+    ax2.spines[["top", "right"]].set_visible(False)
+    ax2.plot(A_LINE, f(A_LINE) / 1e6, color="#555", linewidth=2)
+    secant, = ax2.plot([], [], color=C_TEST, linewidth=2, label="secant through a and a + h")
+    run_rise, = ax2.plot([], [], color=C_TEST, linewidth=1.2, linestyle=":")
+    ends, = ax2.plot([], [], "o", color=C_TEST, markersize=8, zorder=5)
+    tangent, = ax2.plot([], [], color=C_GUESS, linewidth=2, label="tangent at a")
+    dot, = ax2.plot([], [], "o", color=C_GUESS, markersize=9, zorder=6)
+    ax2.legend(loc="center left", frameon=False)
+    info = readout(ax2, family="monospace")
+
+    def update():
+        a, h = t.guess["a"], t.guess["h"]
+        u = yk - b * xk - a
+        line.set_ydata(b * grid + a)
+        gap.set_ydata([yk, yk - u])
+        gap_label.set_position((xk - 2, yk - u / 2))
+        gap_label.set_text(f"u = {u:+.0f}")
+        rise = (f(a + h) - f(a)) / h
+        span = np.array([a - 500, a + h + 500])
+        secant.set_data(span, (f(a) + rise * (span - a)) / 1e6)
+        run_rise.set_data([a, a + h, a + h], np.array([f(a), f(a), f(a + h)]) / 1e6)
+        ends.set_data([a, a + h], np.array([f(a), f(a + h)]) / 1e6)
+        tangent.set_data(span, (f(a) - 2 * u * (span - a)) / 1e6)
+        dot.set_data([a], [f(a) / 1e6])
+        info.set_text(f"secant slope  {rise:+6.0f}\n"
+                      f"tangent slope {-2 * u:+6.0f}\n"
+                      f"difference    {rise + 2 * u:+6.0f} = h")
+
+    t.sliders(["a", "h"], update)
+    t.write(
+        "A derivative is the steepness of a curve at one point. Example: the squared error of the "
+        "largest apartment, as a function of the intercept $a$.",
+        M(rf"$f(a) = u^2$   with   $u = y - {b}\,x - a$"),
+        H("1. Rise over run"),
+        "Move $a$ by a step $h$, so $u$ shrinks by $h$. The slope of the secant (orange):",
+        M(r"$\dfrac{f(a+h) - f(a)}{h} = \dfrac{(u-h)^2 - u^2}{h} = -2u + h$"),
+        H("2. Let h shrink to zero"),
+        "Drag $h$ to the left: the secant becomes the tangent and the leftover $h$ vanishes:",
+        Box(r"$f\,'(a) = -2u = -2\,(y - b\,x - a)$"),
+        H("Rules that save the work"),
+        r"• Chain rule: $(u^2)' = 2u \cdot u'$, with $u' = -1$ for $a$ and $u' = -x$ for $b$.",
+        "• Sum rule: the derivative of the SSE is the sum over all 12 squared errors.",
+        r"• Partial $\partial$: move one knob, treat the other as a fixed number.",
     )
 
 
@@ -524,8 +682,8 @@ def page_calculus_a(t):
         H("Freeze the slope, change only a"),
         "The right plot shows the SSE for every $a$. It is a parabola, and its lowest point is "
         "where the tangent (purple) is flat. The steepness of the tangent is the derivative.",
-        "Take the derivative of each squared error with the chain rule "
-        "(for $u^2$ it is $2u \\cdot u'$, and here $u' = -1$) and set it to zero:",
+        "Every squared error has the derivative $-2u$ from step 6, with $u = y_i - b\\,x_i - a$. "
+        "Add them up over all apartments (sum rule) and set the result to zero:",
         M(r"$\dfrac{\partial\, SSE}{\partial a} = -2 \sum (y_i - b\,x_i - a) = 0$"),
         "Divide by −2 and split the sum. Adding $a$ up $n$ times gives $n\\,a$:",
         M(r"$\sum y_i - b \sum x_i - n\,a = 0$"),
@@ -559,7 +717,8 @@ def page_calculus_b(t):
         r"Plug result 1 into the SSE: replace $a$ by $\bar{y} - b\,\bar{x}$. Now the line always "
         "pivots around the centre, and only $b$ is left:",
         M(r"$SSE(b) = \sum\ ((y_i - \bar{y}) - b\,(x_i - \bar{x}))^2$"),
-        r"Derivative equal to zero again. This time the inner derivative is $-(x_i - \bar{x})$:",
+        r"Derivative equal to zero again. In the chain rule $2u \cdot u'$ the part being squared is "
+        r"$u = (y_i - \bar{y}) - b\,(x_i - \bar{x})$, with inner derivative $u' = -(x_i - \bar{x})$:",
         M(r"$-2 \sum (x_i - \bar{x})\,((y_i - \bar{y}) - b\,(x_i - \bar{x})) = 0$"),
         "Multiply out and bring the $b$ term to the other side:",
         M(r"$\sum (x_i-\bar{x})(y_i-\bar{y}) = b \sum (x_i-\bar{x})^2$"),
@@ -765,7 +924,7 @@ def page_test(t):
         "The 6 test apartments come back. The line has never seen them, so its errors on them "
         "are an honest preview of how it will do on new apartments.",
         M(rf"$R^2_{{test}} = {r2_test:.3f}$      $RMSE_{{test}} = {rmse_test:.2f}$ CHF"),
-        "Same formulas as in step 12, and exactly the numbers linreg.py prints. "
+        "Same formulas as in step 13, and exactly the numbers linreg.py prints. "
         f"Training RMSE was {np.sqrt(SSE_best / n):.0f} CHF. If the test error were far worse, "
         "the model would have memorised noise instead of learning the trend (overfitting). "
         "A line with just 2 numbers can hardly do that.",

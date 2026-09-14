@@ -28,8 +28,8 @@ print(f"rent = {slope:.2f} * size + {intercept:.2f}")
 
 # --- 4. Evaluate on unseen data ---
 y_pred = model.predict(X_test)
-print(f"R²   = {r2_score(y_test, y_pred):.3f}")
-print(f"RMSE = {mean_squared_error(y_test, y_pred) ** 0.5:.2f} CHF")
+print(f"R²   = {r2_score(y_test, y_pred):.3f}       coefficient of determination: share of the rent variation explained (1 = perfect)")
+print(f"RMSE = {mean_squared_error(y_test, y_pred) ** 0.5:.2f} CHF  root mean squared error: typical size of a prediction miss")
 
 # --- 5. Predict something new ---
 print(f"48 m² -> {model.predict([[48]])[0]:.0f} CHF")
